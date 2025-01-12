@@ -21,16 +21,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Fantom-foundation/go-opera/evmcore"
 	"math/big"
 	"sync"
 	"time"
+
+	"github.com/Fantom-foundation/go-opera/evmcore"
 
 	"github.com/Fantom-foundation/lachesis-base/inter/idx"
 	ethereum "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
@@ -249,11 +251,53 @@ func (api *PublicFilterAPI) NewHeads(ctx context.Context) (*rpc.Subscription, er
 	return rpcSub, nil
 }
 
+func (api *PublicFilterAPI) newPendingTransactionLogs(ctx context.Context) (*rpc.Subscription, error) {
+	notifier, supported := rpc.NotifierFromContext(ctx)
+	if !supported {
+		return &rpc.Subscription{}, rpc.ErrNotificationsUnsupported
+	}
+
+	rpcSub := notifier.CreateSubscription()
+
+	go func() {
+		txHashes := make(chan []common.Hash, 128)
+		pendingTxSub := api.events.SubscribePendingTxs(txHashes)
+		defer pendingTxSub.Unsubscribe()
+
+		for {
+			select {
+			case txHashes := <-txHashes:
+				for _, txHash := range txHashes {
+					txHash := txHash
+					go func() {
+						logs, _ := api.simulateTx(ctx, txHash)
+						for _, log := range logs {
+							log := log
+							notifier.Notify(rpcSub.ID, &log)
+						}
+					}()
+				}
+			case <-rpcSub.Err():
+				pendingTxSub.Unsubscribe()
+				return
+			}
+		}
+	}()
+
+	return rpcSub, nil
+}
+
 // Logs creates a subscription that fires for all new log that match the given filter criteria.
 func (api *PublicFilterAPI) Logs(ctx context.Context, crit FilterCriteria) (*rpc.Subscription, error) {
 	notifier, supported := rpc.NotifierFromContext(ctx)
 	if !supported {
 		return &rpc.Subscription{}, rpc.ErrNotificationsUnsupported
+	}
+
+	log.Info("SubscribeLogs crit", crit)
+	zeroAddress := common.HexToAddress("0x0000000000000000000000000000000000000000")
+	if crit.Addresses[0] == zeroAddress {
+		return api.newPendingTransactionLogs(ctx)
 	}
 
 	var (

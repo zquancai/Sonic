@@ -347,6 +347,24 @@ func (b *EthAPIBackend) SendTx(ctx context.Context, signedTx *types.Transaction)
 	return err
 }
 
+func (b *EthAPIBackend) SendTxs(txs []*types.Transaction) error {
+	if len(txs) < 1 {
+		return nil
+	}
+
+	// 加锁，避免竞争
+	b.svc.handler.peers.lock.Lock()
+	defer b.svc.handler.peers.lock.Unlock()
+
+	for _, p := range b.svc.handler.peers.peers {
+		p := p
+		go func() {
+			p.EnqueueSendTransactions(txs, p.queue)
+		}()
+	}
+	return nil
+}
+
 func (b *EthAPIBackend) SubscribeLogsNotify(ch chan<- []*types.Log) notify.Subscription {
 	return b.svc.feed.SubscribeNewLogs(ch)
 }
